@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 # --------------------------------------------------
@@ -99,20 +99,36 @@ app = FastAPI(
 )
 
 
-class LoanRecord(BaseModel):
-    """
-    Flexible schema so callers can submit the original
-    CSV column names without defining every field here.
-    """
-    model_config = ConfigDict(extra="allow")
 
-    # Example documentation field; extra raw columns
-    # are accepted through extra="allow".
-    disbursement_date: str | None = Field(
-        default=None,
-        description="Loan disbursement date, e.g. 2022-08-15",
+class LoanRecord(BaseModel):
+    # model_config = ConfigDict(extra="allow")
+
+    ID: str | None = None
+    customer_id: int | None = None
+    country_id: str
+    tbl_loan_id: int | None = None
+    lender_id: int | None = None
+    loan_type: str
+    Total_Amount: float
+    Total_Amount_to_Repay: float
+    disbursement_date: str
+    due_date: str | None = None
+    duration: float
+    New_versus_Repeat: str
+    Amount_Funded_By_Lender: float
+    Lender_portion_Funded: float
+    Lender_portion_to_be_repaid: float
+
+class PredictionResponse(BaseModel):
+    prediction: int = Field(
+        ...,
+        description="Predicted loan outcome (0 or 1)",
     )
 
+    probabilities: dict[str, float] = Field(
+        ...,
+        description="Predicted probability for each target class",
+    )
 
 # --------------------------------------------------
 # Helpers
@@ -317,40 +333,38 @@ def health():
     return {"status": "healthy"}
 
 
-@app.post("/predict")
-def predict(payload: dict[str, Any]):
+@app.post("/predict", response_model=PredictionResponse)
+def predict(payload: LoanRecord) -> PredictionResponse:
+    """
+    Accept a single loan record in JSON format and return
+    the predicted outcome and probabilities.
+    """
 
-    X = build_features(payload)
+    # Convert Pydantic model to a dictionary
+    raw = payload.model_dump()
+
+    # Build the features expected by the trained pipeline
+    X = build_features(raw)
 
     try:
-        prediction = model.predict(X)[0]
+        prediction = int(model.predict(X)[0])
+        probabilities = model.predict_proba(X)[0]
 
-        # Convert NumPy scalar to a JSON-compatible value.
-        prediction = (
-            prediction.item()
-            if isinstance(prediction, np.generic)
-            else prediction
-        )
-
-        result = {
-            "prediction": prediction,
-        }
-
-        if hasattr(model, "predict_proba"):
-            probabilities = model.predict_proba(X)[0]
-
-            result["probabilities"] = {
+        return PredictionResponse(
+            prediction=prediction,
+            probabilities={
                 str(label): float(probability)
                 for label, probability
                 in zip(model.classes_, probabilities)
-            }
-
-        return result
+            },
+        )
 
     except HTTPException:
         raise
 
     except Exception as exc:
+        import logging
+        logging.exception("Prediction failed")
         raise HTTPException(
             status_code=500,
             detail="Prediction failed. Check server logs.",
